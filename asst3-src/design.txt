@@ -1,0 +1,131 @@
+Hash Page Table design
+
+Our hash page table is made out of an array of pointers to the hash page table entry. 
+
+The hash page table entry has the following fields:
+struct hpt_entry {
+	struct addrspace * PID;				/* ASID */
+	vaddr_t VPN;						/* virtual page number */
+	paddr_t PFN;						/* PFN + valid bit + dirty bit */
+	struct hpt_entry * next_entry;		/* pointer to next entry for collision */
+};
+
+Since the hash page table is a global resource, we created a hpt_lock to deal with concurrency issue.
+
+void hpt_bootstrap(void)
+    - initialised the hash page table 
+    - ram steal mem to alloc memory for it 
+    - twice as many pages as the frametable
+
+struct hpt_entry * hpt_lookup(struct addrspace * as, vaddr_t faultaddress)
+    - search for the page table entry in the hash page table 
+    - a matching page table entry should have the same address space id and virtual page number
+    - return the correct page table entry if found 
+    - Otherwise, return null
+
+struct hpt_entry * hpt_insert(struct addrspace * as, vaddr_t VPN, paddr_t PFN, int dirty_bit)
+    - create new page table entry 
+    - used hpt_hash to find the index 
+    - insert new entry to hash page table 
+        - find free spot in the hash table starting with the index, go along the linked list until the free spot
+        - place the new entry in the free spot
+
+void hpt_delete(struct addrspace * as, vaddr_t VPN)
+    - remove the page table entry from the hash page table
+
+uint32_t hpt_hash(struct addrspace *as, vaddr_t faultaddr)
+    - hash function to find the index of hash page table that a page table entry should be placed
+
+
+
+Frametable design 
+
+The frametable entry has the following fields:
+
+struct frametable_entry {
+        bool used;              /* indicate the frame is free or in used */
+        int next;               /* next free frame if the frame is not use */
+};
+
+Initialisation of frametable and hash page table
+
+Vm_bootstrap() is called upon kernel booting. This inturn calls hpt_bootstrap and frametable_bootstrap. hpt_bootstrap is called before frametable_bootstrap as we need to allocate a range of memory for hash page table that won't be managed by the frametable.We use ram steal mem to get the memory. The hash page table is placed on top of OS161. Our hash page table has twice as many pages as the frametable. After the hash page table is initialised, we call frametable_bootstrap. In frametable_bootstrap, we find the first free ram and the number of pages available. frametable_bootstrap uses alloc_kpages indirectly via kmalloc, which uses ram_stealmem at this point while we are setting up the frametable. We used the original spinlock for stealmem. Once the frametable is initialised, the alloc_kpages uses frames to alloc and free_kpages to dealloc memory. Once we initialised the frametable, we marked those pages used by os161 as used.
+
+
+Since the frametable is a global resource, we create a spinlock called frametable_lock to deal with concurrency issue. 
+A spinlock is made use of in the following situations:
+        - Acquiring memory within alloc_kpages()
+        - Freeing a page within free_kpages()
+
+This is to prevent race condition for the frametable pointer
+
+
+
+Address space design
+
+The region data structure has the following fields:
+struct region {
+    vaddr_t vbase;              //virtual address of the region
+    size_t npages;              //size of the region           
+    int read;                   //read permission of the region
+    int write;                  //write permission of the region
+    int execute;                //execute permission of the region
+    int old_write;              //old write permission of the region for as_prepare load
+    struct region* next;        //pointer to the next region
+};
+
+Our address space is just a linked list of region. We chose this data structure as it is easy to managed. All the regions in the linked list 
+are valid. 
+
+The following functions were implemented within kern/vm/addrspace.c:
+
+struct addrspace *as_create(void)
+    - creates an address space
+
+int as_copy(struct addrspace *old, struct addrspace **ret)
+    - allocates new destination address space 
+    - calls copy_region to copy all region in old address space
+
+void as_destroy(struct addrspace *as)
+    - delete page table entry and frames for the address space
+    - free all regions in the address space
+
+void as_activate(void) and void as_deactivate(void)
+    - flush tlb when there is an address space
+
+int as_define_region(struct addrspace *as, vaddr_t vaddr, size_t memsize, int readable, int writeable, int executable)
+    - create a new region within a given address space
+    - add the region to appropriate position in the address space
+
+int as_prepare_load(struct addrspace *as)
+    - store current write permissions 
+    - make read only page to read write
+
+int as_complete_load(struct addrspace *as)
+    - restore original write permission 
+
+int as_define_stack(struct addrspace *as, vaddr_t *stackptr)
+    - stack size is 16 pages
+    - used as_define_region 
+    - define the stack region within the given address space
+
+struct region* region_mapping(struct addrspace* as, vaddr_t fault_addr)
+    -search for the correct region in the address space based on the fault address
+
+struct region* copy_region(struct addrspace* newas, struct region* old_region)
+    - copy all the region from the old address spcare to the new address space
+    - for each mapped page in the old address space
+        - allocate frame in destination 
+        - copy contents from source frame to destination frame
+        - add page table entry for new address space
+
+
+
+TLB 
+void write_tlb(vaddr_t VPN, paddr_t PFN)
+    - put VPN in entryHi, leave ASID part as 0
+    - put PFN in entryLo. PFN already include dirty bit and valid bit 
+    - write to tlb with entryHi and entryLo 
+
+void tlb_flush(void)
+    - flush tlb during context switching 

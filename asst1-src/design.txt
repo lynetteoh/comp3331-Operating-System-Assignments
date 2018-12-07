@@ -1,0 +1,99 @@
+Place your design document here.
+
+Part A
+In this part, the shared resources among threads are the counter variable and the adder_counters variable. They are accessed by the all running threads which need them and results in concurrency issues. Hence, the result produced by the adder function is incorrect. 
+
+The adder function contains a critical region that should be accessed by one thread at a time. This critical region is lied within the while loop between line 86 to line 92, where the adder function acquire for the counter variable and performs addition on it. 
+
+To restrict only one thread is able to use the shared resources, we create a mutual exclusion lock called mutex. Any thread that successfully acquired the lock will be able to carry out the operations in the while loop.If there is a thread trying to acquire the lock at this moment, it will go to sleep until the lock is released. At the end of an iteration, the thread that is holding the mutex lock will release the lock. 
+
+In conclusion, once a thread has successfully locked the critical region, no other thread is able to execute code in the critical region until it is unlocked by the thread who locked it. 
+
+
+Part B
+Both threads are running in parallel and the lock acquired by both threads are not in the same order. For Bill to execute its code, it has to acquire 'locka' first then after a little delay tries to acquire 'lockb'. On the other hand, Ben acquires 'lockb' first and then tries to acquire 'locka'. By the time, Bill tries to acquire 'lockb', it has already been held by Ben. So, it start waiting for Ben to release 'lockb'. Then, the scheduler gives Ben the chance to run because it wants the system to make some progress. Ben then tries to get 'locka' but is held by Bill. Hence, Ben waits for Bill to release 'locka'. Thus, both threads end up waiting forever for each other. This results in a deadlock. 
+
+So, to prevent deadlock, both threads have to acquire the locks and release them in the same order. All threads must acquire 'locka' first then 'lockb' and release 'lockb' first then 'locka'.
+
+The critical region in this part lies in the for loop of each function where the shared resources are. The shared resources in this code are the 'unusedint' and 'unusedpointer'.
+
+
+Part C
+In this part, we created two semaphores (consumer_sem, producer_sem), two integer variables(start, end) and a mutually exclusive lock. We initialized all these variables in producerconsumer_startup() function and destroyed it at the end of this program.
+
+The shared resources in this part are the buffer array and the indices of the first element and last element in the buffer array. 
+
+Consumer_receive() function 
+The consumer thread consumes data in the buffer. When the function starts, the consumer_sem semaphore has value zero and the thread is blocked. The value of this semaphore represents the number of items in the buffer. Currently, it is zero as no producers have inserted an item in the buffer. The consumer waits until a producer adds an item into the buffer and increment the consumer_sem (V(consumer_sem)). Then, the blocked consumer receive the signal and unblocked. It decrements the consumer_sem by one and runs its operation. 
+
+Then, the consumer acquires the mutual exclusive lock so that no threads can access the buffer and the start index. 
+
+The critical region in this function is :
+thedata = buffer[start];
+start++;
+start = start % BUFFER_SIZE;
+
+The buffer is being accessed with the start index. After the consumer has removed the item from the buffer, the start index is updated. The consumer releases the mutual exclusive lock once it has completed its removal operation. The producer_sem is increment by one to indicate that the consumer has removed the item and there is an extra empty space. 
+
+Producer_send() function
+When the function starts, the producer_sem semaphore has a value of BUFFER_SIZE, indicates that there is BUFFER_SIZE number of free spaces. First, the producer_sem is decremented by one as there will be one less spot since the producer is going to insert an item into the buffer. Then, the producer tries to acquire mutual exclusive lock for the buffer and the end index to ensure no other thread is using it. 
+
+The critical region in this function is: 
+end++;
+end = end % BUFFER_SIZE;
+buffer[end] = item; 
+
+A new end index is computed so that it can be used to access an empty space in the buffer. The producer then inserts the item into the slot. After it has done its operation, the producer releases the lock and increment the consumer_sem to signal the consumer thread that an item is added to the buffer. 
+
+Part D
+
+bar_open()
+This function is used to initialize all locks and semaphores needed in this program.I have created a mutually exclusive lock(mutex) for the critical region. Each bottle also has a mutual exclusive lock stored in an array(bottleLock[NBOTTLE]) to ensure that only one thread can use the bottle at a time. Besides, I have created an array of semaphores for the customers(customers[NCUSTOMERS]) to ensure that each customer can only order other drinks after their order is served. In addition, I created a bartender semaphore and an orderSem semaphore to control access to the buffer. 
+
+
+bar_close()
+This function is used to destroy all initialized all locks and semaphores used this program. 
+
+
+order_drink()
+First, decrement the orderSem semaphore by one (P(orderSem)) to indicate that there is one less free spot in the orderBuffer buffer. If the semaphore has a value of 0, the customer thread is blocked until the semaphore has a value of larger than or equal to 1. To block other threads from entering the critical region, the current customer thread acquires a mutually exclusive lock. 
+
+The shared resources are the buffer and end index.  It is locked by the mutex lock. 
+
+In this function, the critical region is as follows: 
+end ++;
+end = end % NCUSTOMERS;
+orderBuffer[end] = order;
+order->customerID = end;
+
+The end index is being updated and we used it to add the new order into the buffer. Once the order is being recorded in the orderBuffer, we update the customer id of the order with the end index. 
+
+The customer releases the mutual exclusive lock after it has done its operations and exits the critical region. Then, it increments the bartender semaphore through V(bartender) call to notifies the bartender thread that there is an order waiting for it to make and indicates that a spot has been occupied.  
+
+Finally, the semaphore of the customer who orders the drinks is decremented to ensure that the customer does not order other drinks. Thus, the customer is in the blocked state.
+
+
+take_order()
+The bartender thread tries to decrement the bartender semaphore. If the semaphore has a value of 0, then it is blocked until the value is greater than or equal to 1. The shared resources in this function are the start index and the orderBuffer buffer. 
+
+The bartender thread has to acquire the mutual exclusive lock before entering the critical region. 
+
+The critical region in this funtion is as follows :
+ret = orderBuffer[start];
+start ++;
+start = start % NCUSTOMERS;
+
+Once it has successfully acquired the lock, it can remove the order from the buffer. Then, the bartender computes the new start index and updates it. Eventually, it releases the mutual exclusive lock and exits the critical region. 
+
+After all these operations, the bartender makes a V(orderSem) call to increment the semaphore by one, indicating that there is one free spot available. This means any blocked customer thread can now carry out its operation. 
+
+
+fill_order()
+This function gets the requested bottles from the order struct. Since the bottles are represented by numbers larger than 0, we sort them using bubble sort. Then, we acquire the lock for each bottle according to the sorted bottles order to prevent deadlock. If the bottle is represented by 0, we ignore it. 
+
+Besides, we only lock the needed bottles so other bartenders are able to mix the drinks if they do not acquire the same bottle at the same time. Once the mix operation has done, all bottles locks that were held are released. 
+
+
+serve_order()
+Once an order is completed, we retrieved the customer id from the order struct and used it to find the correct customer semaphore. Then, we make a V(customer[order->customerID]) call to increment the semaphore by one to allow the customer to order other drinks.  The customer is unblocked and able to make a new order. 
+

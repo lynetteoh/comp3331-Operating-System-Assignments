@@ -1,0 +1,433 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <kern/fcntl.h>
+#include <kern/limits.h>
+#include <kern/stat.h>
+#include <kern/seek.h>
+#include <lib.h>
+#include <uio.h>
+#include <thread.h>
+#include <current.h>
+#include <synch.h>
+#include <vfs.h>
+#include <vnode.h>
+#include <file.h>
+#include <syscall.h>
+#include <copyinout.h>
+#include <proc.h>
+
+
+
+
+int fdtable_bootstrap(void){
+
+    int fd, result;
+    char *stdin = kstrdup("con:");
+    char *stdout = kstrdup("con:");
+    char *stderr = kstrdup("con:");
+    
+    curproc->fd_table = kmalloc(sizeof(int)*OPEN_MAX);
+    if(curproc->fd_table == NULL){
+        return ENOMEM;
+    } 
+    
+    //ensure file descriptor table is empty
+    for(int i = 0; i < OPEN_MAX; i++){
+        curproc->fd_table[i] = INT_MIN;
+    }
+    
+    //stdin file descriptor
+    result = file_open(stdin, O_RDONLY, 0, &fd);
+    if(result){
+        kfree(curproc->fd_table);
+        return result;
+    }
+
+    //stdout file descriptor
+    result = file_open(stdout, O_WRONLY, 0, &fd);
+    if(result){
+        kfree(curproc->fd_table);
+        return result;
+    }
+
+    //stderr file descriptor
+    result = file_open(stderr, O_WRONLY, 0, &fd);
+    if(result){
+        kfree(curproc->fd_table);
+        return result;
+    }
+
+    return 0;
+}
+
+
+int oftable_bootstrap(void){
+    
+    //create open file table
+    of_table = kmalloc(sizeof(struct open_file_table));
+    if (of_table == NULL) {
+        return ENOMEM;
+    }
+
+    //ensure that all open file table entry are empty
+    for(int i = 0; i < OPEN_MAX; i++){
+        of_table->of_entry[i].vn_ptr = NULL;
+        of_table->of_entry[i].offset = -1;
+        of_table->of_entry[i].open_count = 0;
+        of_table->of_entry[i].flag = -1;
+    }
+
+    //create lock for the open file table
+    of_table->lock_table = lock_create("lock_table");
+
+    if(of_table->lock_table == NULL) {
+        return ENOMEM;
+    }
+
+    return 0;
+}
+
+int file_open(char *filename,int flag, mode_t mode, int *fd){
+    int of_val, result;
+    struct vnode *vn;
+    
+    *fd = INT_MIN;
+    of_val = INT_MIN;
+
+    //check if filename is not null
+    if(filename == NULL){
+        return ENOENT;
+    }
+
+    //find free position in the file descriptor table
+    for(int i = 0; i < OPEN_MAX; i++){
+        if(curproc->fd_table[i] == INT_MIN){
+            *fd = i;
+            break;
+        }
+    }
+
+    if(*fd == INT_MIN){
+        return EMFILE;
+    }
+
+    //open a file 
+    result = vfs_open(filename, flag, mode, &vn);
+    if(result){
+        curproc->fd_table[*fd] = INT_MIN;
+        *fd = INT_MIN;
+        return result;
+    }
+
+    lock_acquire(of_table->lock_table);
+
+    //free free spot in the global open file table
+    for(int i = 0; i < OPEN_MAX; i++){
+        if(of_table->of_entry[i].vn_ptr == NULL){
+            of_val = i;
+            of_table->of_entry[i].vn_ptr = vn;
+            of_table->of_entry[i].flag = flag;
+            of_table->of_entry[i].offset = 0;
+            of_table->of_entry[i].open_count = 1;    
+            lock_release(of_table->lock_table);
+            break;
+        }
+    }
+
+
+    if(of_val == INT_MIN){
+        vfs_close(vn);
+        return EMFILE;
+    }
+
+    curproc->fd_table[*fd] = of_val;
+    
+    return 0;
+
+}
+
+int sys_open(userptr_t filename,int flag, mode_t mode, int *fd){
+
+    int result;
+    char *path;
+    
+    
+    path = (char *) kmalloc(sizeof(char)*PATH_MAX);
+    if(path == NULL){
+        return ENOMEM;
+    }
+
+     //copy filename from user space into kernel space
+    result = copyinstr(filename, path, PATH_MAX, NULL);
+	if (result) {
+        kfree(path);
+		return result;
+	}
+
+    result = file_open(path, flag, mode, fd);
+    kfree(path);
+    return result;
+
+}
+
+
+int sys_write(int fileDescriptor, userptr_t buffer, size_t length, int *size){
+    int value, entry;
+    struct iovec iov;
+    struct uio uio;
+
+    if(buffer == NULL){
+        return EFAULT;
+    }
+
+    //check if file descriptor is valid
+    if(fileDescriptor < 0 || fileDescriptor >= OPEN_MAX) return EBADF;
+    
+
+    //get the open file index
+    entry = curproc->fd_table[fileDescriptor];
+    if(entry < 0 || entry >= OPEN_MAX){
+        return EBADF;
+    }
+
+    lock_acquire(of_table->lock_table);
+
+    //check the entry is valid and the file is open with the correct flag
+    if(of_table->of_entry[entry].vn_ptr == NULL || of_table->of_entry[entry].flag == O_RDONLY){
+        lock_release(of_table->lock_table);
+        return EBADF;
+    }
+ 
+    //initialize uio and iovec for kernel I/O
+    iov.iov_kbase = buffer;
+	iov.iov_len = length;
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = of_table->of_entry[entry].offset;
+	uio.uio_resid = length;
+	uio.uio_segflg = UIO_USERSPACE;
+	uio.uio_rw = UIO_WRITE;
+	uio.uio_space = curthread->t_proc->p_addrspace;
+
+    //write into file
+    value = VOP_WRITE(of_table->of_entry[entry].vn_ptr, &uio);
+    if(value){
+        lock_release(of_table->lock_table);
+        *size = 0;
+        return value;
+    }
+
+    //update the offset 
+    of_table->of_entry[entry].offset = uio.uio_offset;
+    lock_release(of_table->lock_table);
+
+    //find the number of bytes written
+    //The amount write is the size of the buffer originally, minus how much is left in it.
+    *size = length - uio.uio_resid;
+    
+
+    return 0;
+
+}
+
+
+int sys_read(int fileDescriptor, userptr_t buffer, size_t length, int *size){
+    int value, entry;
+    struct iovec iov;
+    struct uio uio;
+
+    if(buffer == NULL){
+        return EFAULT;
+    }
+
+    if(fileDescriptor < 0 || fileDescriptor >= OPEN_MAX) return EBADF;
+
+    //get the open file index
+    entry = curproc->fd_table[fileDescriptor];
+    if(entry < 0 || entry >= OPEN_MAX){
+        return EBADF;
+    }
+
+    lock_acquire(of_table->lock_table);
+
+    //check the entry is not null and the file is open with the correct flag
+    if(of_table->of_entry[entry].vn_ptr== NULL || of_table->of_entry[entry].flag == O_WRONLY ){
+        lock_release(of_table->lock_table);
+        return EBADF;
+    }
+
+
+    //initialize uio and iovec for kernel I/O
+    iov.iov_kbase = buffer;
+	iov.iov_len = length;
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_offset = of_table->of_entry[entry].offset;
+	uio.uio_resid = length;
+	uio.uio_segflg = UIO_USERSPACE;
+	uio.uio_rw = UIO_READ;
+	uio.uio_space = curthread->t_proc->p_addrspace;
+
+    //read into vnode 
+    value = VOP_READ(of_table->of_entry[entry].vn_ptr, &uio);
+    if(value){
+        lock_release(of_table->lock_table);
+        *size = 0;
+        return value;
+    }
+
+    //update the offset
+    of_table->of_entry[entry].offset = uio.uio_offset;
+    lock_release(of_table->lock_table);
+
+    //find the number of bytes read
+    //The amount read is the size of the buffer originally, minus how much is left in it.
+    *size = length - uio.uio_resid;
+
+    return 0;
+    
+}
+
+
+int sys_close(int fileDescriptor){
+    int entry;
+
+    if(fileDescriptor < 0 || fileDescriptor >= OPEN_MAX) return EBADF;
+
+    //get the open file index
+    entry = curproc->fd_table[fileDescriptor];
+    if(entry < 0 || entry >= OPEN_MAX){
+        return EBADF;
+    }
+    
+    if(!lock_do_i_hold(of_table->lock_table)){
+        lock_acquire(of_table->lock_table);
+    }
+    
+    if(of_table->of_entry[entry].vn_ptr == NULL){
+        lock_release(of_table->lock_table);
+        return EBADF;
+    }
+
+    if(of_table->of_entry[entry].open_count == 1){
+        vfs_close(of_table->of_entry[entry].vn_ptr);
+        of_table->of_entry[fileDescriptor].vn_ptr = NULL;
+        of_table->of_entry[fileDescriptor].offset = -1;
+        of_table->of_entry[fileDescriptor].open_count = 0;
+        of_table->of_entry[fileDescriptor].flag = -1;
+    }else{
+        of_table->of_entry[entry].open_count--;
+    }
+
+
+    curproc->fd_table[fileDescriptor] = INT_MIN;
+    lock_release(of_table->lock_table);
+
+    return 0;
+
+}
+
+
+int sys_lseek(int fileDescriptor, off_t position, int whence, off_t *offset){
+    int result, entry;
+    struct stat stat;
+    
+    //check position is valid
+    if(position < 0) {
+        return EINVAL;
+    }
+
+    // check  whence is valid
+	if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) {
+		return EINVAL;
+	}
+
+    //check if file descriptor is valid
+    if(fileDescriptor < 0 || fileDescriptor >= OPEN_MAX) return EBADF;
+
+    //get the open file index
+    entry = curproc->fd_table[fileDescriptor];
+    if(entry < 0 || entry >= OPEN_MAX){
+        return EBADF;
+    }
+
+    lock_acquire(of_table->lock_table);
+
+    //check if the file is seekable
+    if(!VOP_ISSEEKABLE(of_table->of_entry[entry].vn_ptr)){
+        lock_release(of_table->lock_table);
+        return ESPIPE;
+    }
+    
+    //start of the file
+    if(whence == SEEK_SET)
+		*offset = position;
+    
+    //current position of the file pointer
+	else if(whence == SEEK_CUR)
+		*offset = of_table->of_entry[entry].offset + position;
+
+    //end of the file
+	else if(whence == SEEK_END) {
+		result = VOP_STAT(of_table->of_entry[entry].vn_ptr, &stat);
+		if(result){
+            lock_release(of_table->lock_table);
+            return result;
+        }
+
+		*offset = stat.st_size + position;
+	}
+
+    if(*offset < 0){
+        lock_release(of_table->lock_table);
+        return EINVAL;
+    }
+
+    //update new position of the file
+    of_table->of_entry[entry].offset = *offset;
+    lock_release(of_table->lock_table);
+
+    return 0;
+}
+
+
+int sys_dup2(int fileDescriptor, int newFD, int *fd){
+
+    int result, entry; 
+
+    if(fileDescriptor < 0 || fileDescriptor >= OPEN_MAX) return EBADF;
+    if(newFD < 0 || newFD >= OPEN_MAX) return EBADF;
+
+    //if old file descriptor and new file descriptor 
+    //are the same, do nothing
+    if(fileDescriptor == newFD){
+        *fd = newFD;
+        return 0;
+    }
+
+    //get the old open file index
+    entry = curproc->fd_table[fileDescriptor];
+    if(entry < 0 || entry >= OPEN_MAX){
+        return EBADF;
+    }
+
+    //get the new open file index
+    entry = curproc->fd_table[newFD];
+    if(entry != INT_MIN){   
+        result = sys_close(newFD);
+        if(result){
+            return EBADF;
+        }
+    }
+
+
+    lock_acquire(of_table->lock_table);
+    //increase the file link
+    of_table->of_entry[entry].open_count++;
+    lock_release(of_table->lock_table);
+    //record the open file index in the new file descriptor
+    curproc->fd_table[newFD] = curproc->fd_table[fileDescriptor];
+    *fd = newFD;
+
+    return 0;
+}

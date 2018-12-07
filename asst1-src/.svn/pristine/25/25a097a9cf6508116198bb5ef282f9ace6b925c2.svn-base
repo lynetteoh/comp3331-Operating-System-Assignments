@@ -1,0 +1,25 @@
+Place your design document here.
+
+Part A
+In this part,the shared resources among threads are the counter variable and the adder_counters variable. They are accessed by the all running threads which need them and results in concurrency issues. Hence, the result produced by the adder function is incorrect. 
+
+The adder function contains critical region that should be accessed by one thread at a time. This critical region is lied within the while loop between line 86 to line 101, where the adder function acquire for the counter variable and performs addition on it. 
+
+To restrict only one thread is able to use the shared resources, we create a mutual exclusion lock called mutex. Any thread that successfully acquired the lock will be able to carry out the operations in the while loop.If there is a thread trying to acquire the lock at this moment, it will go to sleep until the lock is release. At the end of a iteration, the thread that is holding the mutex lock will release the lock. 
+
+In conclusion, once a thread has successfully locked the critical region, no other thread is able to execute code in the critical region until it is unlocked by the the thread who locked it. 
+
+
+Part B
+Both threads are running in parallel and the lock acquired by both threads are not in the same order. For Bill to execute its code, it has to acquire 'locka' first then after a little delay tries to acquire 'lockb'. On the other hand, Ben acquires 'lockb' first and then tries to acquire 'locka'. By the time, Bill tries to acquire 'lockb', it has already been held by Ben. So, it start waiting for Ben to release 'lockb'. Then, the scheduler give Ben the chance to run because it wants the system to make some progress. Ben then tries to get 'locka' but is held by Bill. Hence, Ben waits for Bill to release 'locka'. Thus, both threads end up waiting forever for each other. This results in deadlock. 
+
+So, to prevent deadlock, both threads have to acquire the locks and release them in the same order. All threads must acquire 'locka' first then 'lockb' and release 'lockb' first then 'locka'.
+
+The critical region in this part lies in the for loop of each function where the shared resources are. The shared resources in this code are the 'unusedint' and 'unusedpointer'.
+
+
+Part C
+
+
+Part D
+

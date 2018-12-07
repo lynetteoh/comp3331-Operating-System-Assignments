@@ -1,0 +1,127 @@
+Per process file descriptor table
+Each process has a pointer to an array of open file entries. 
+The index of entries[OPEN_MAX] is the filedescriptor. 
+Since we don't know how many processes we will be test on and how many files 
+will be opened beforehand, we decided to make each per process file descriptor 
+table accommodates OPEN_MAX number of open file entries. This way we are 
+able to accommodate any number of open files and don't have to worry about 
+the size of the global open files table. We have added a pointer to the file descriptor 
+table in the process structure and initialize the file descriptor table 
+in fdtable_bootstrap function.
+
+Each open file table entry has the following variables: struct
+open_file_table_entry{
+    struct vnode *vn_ptr;       //pointer to vnode provided by vfs layer
+    off_t offset;               //the position in the file to start reading
+    int open_count;     		//number of references to this file descriptor
+    int flag;   				//indicate the mode of the file, ie, 
+									read only, write only, etc 
+	struct lock *lock_entry;	//lock entry
+};
+
+
+int fdtable_bootstrap(void); 
+This function initialises the file descriptor table. 
+It first allocates the amount of space needed by the file
+descriptor table in memory(OPEN_MAX*struct_file_descriptor_table). Then,
+it initializes all pointers in fd_table->entries[OPEN_MAx] to NULL to
+indicate that all of them are empty. Next, it inserts stdin, stdout
+and stderr into the file descriptor table and given file descriptor 0,
+1 and 2 respectively. The file descriptors 0 (stdin), 1 (stdout) and 2
+(stderr) are attached to the console device ("con:").
+
+
+static struct open_file_table_entry *of_entry_bootstrap() 
+First, it malloc the open file table entry with the size of struct
+open_file_table_entry. 
+
+Then, it intializes the variable in the struct open_file_tables_entry as following:
+	entry->vn_ptr = NULL; 
+	entry->offset = -1; 
+	entry->open_count = 0;
+	entry->flag = -1;
+
+This indicates that the open file entry is empty. it also created a lock
+(lock_entry) to lock the entry when needed. The lock will only allows
+one process to access the entry at a time.
+
+int file_open(char *filename,int flag, mode_t mode, int *fd); 
+This function opens a file and records the information of an open file in the
+file descriptor table. It then calls vfs_open.	If vfs_open is successful,
+it creates and set up the open file table entry by storing the offset,
+vnode, flag and etc. Next, it checks any available spot in the file
+descriptor table. If there isn't any space, it will free the open file
+entry and return EMFILE error otherwise it set the fd to the index of the
+array.	It also store the open file entry into the fd_table at position
+fd. On failure, it the curproc->fd_table->entries[fd] is equal to null
+and fd is equal to INT_MIN(to indicate the file descriptor is invalid).
+
+int sys_open(userptr_t filename,int flag, mode_t mode, int *fd); 
+This function is a syscall to open a file. It takes in the pointer from
+userland. Hence,it needs to copy the filename into kernel space with the
+help of copyinstr. It stores the filename in path. If the conversion is
+sucessful, it calls file_open otherwise, it free up the path and return
+the result of copyinstr.
+
+int sys_write(int fileDescriptor, userptr_t buffer, size_t length, int *size); 
+This function is a syscall to write from a buffer to a file. 
+First, It checks the buffer is not null and the file descriptor
+is valid. it gets the open file entry from the file descriptor table
+at position given by the file descriptor. If open file entry is null,
+it will return EBADF. Otherwise, it acquires the lock_entry lock to lock
+the open file entry so that this process gets mutual exclusive access to
+this open file table. It also checks if the file is open with the correct
+mode. If it does, it set up the uio and iovec struct for kernel I/O.
+Then, it writes the data inside the buffer into the file with VOP_WRITE
+and updates the offset of the file pointer to the number of bytes written
+plus the original position of file pointer. it then releases the lock
+and return the number of bytes written. The amount write is the size of
+the buffer originally, minus how much is left in it.
+
+int sys_read(int fileDescriptor, userptr_t buffer, size_t length, int *size); 
+This function is a syscall to read data from a file to a buffer.
+First, It checks the buffer is not null and the file descriptor
+is valid. it gets the open file entry from the file descriptor table
+at position given by the file descriptor. If open file entry is null,
+it will return EBADF. Otherwise, it acquires the lock_entry lock to lock
+the open file entry so that this process gets mutual exclusive access to
+this open file table. It also checks if the file is open with the correct
+mode. If it does, it set up the uio and iovec struct for kernel I/O.
+Then, it read from file the file into the buffer with VOP_READ and
+updates the offset of the file pointer to the number of bytes written
+plus the original position of file pointer. it then releases the lock
+and return the number of bytes read. The amount read is the size of the
+buffer originally, minus how much is left in it.
+
+int sys_close(int fileDescriptor); 
+This function is a syscall to close any open file. 
+First, it checks the for valid file descriptor then it
+uses it to get the open file entry in the fd_table. It then checks if
+the current thread is holding the holding the lock, if it doesn't, it
+acquires the lock to ensure no other process will access the entry. If
+the open file entry's open count is more than 1, it means there are
+more than 1 processeses are using this file. This function decrements
+the open_count by 1 as there is one less process using it. Otherwise,
+if the open_count is equal to one, it closes the file with vfs_vlose and
+free the entry and destroy the lock. It also set the current process's
+fd_table->entries[fileDescriptor] to NULL.
+
+int sys_lseek(int fileDescriptor, off_t position, int whence, off_t *offset); 
+This function is a syscall to move the file pointer to a desired 
+position in a file. First, it checks if the position is not smaller than 
+0, the whence and the file descriptor are valid. Then, it gets the open
+file entry. Before accessing the entry, it acquires the lock_entry to
+prevent other processes from entering the entry. It check if the file is
+seekable. If it isn't it return ESPIPE and releases the lock. Otherwise,
+it change the file pointer depending on the whence and position. The
+offset is set to the position of the file pointer and it is updated in
+the open file entry. After this process, it releases the lock.
+
+int sys_dup2(int fileDescriptor, int newFD, int* fd); 
+This function first creates a copy of the old file descriptor to the new
+fileDescriptor. First, it checks the new file descriptor and old
+file descriptor are valid. If there are the same, just update fd to
+the new file descriptor and return. If the new file descriptor isn't
+NULL, it closes the file first. Then, it acquires the lock_entrys
+and increment the open file entry open_count.It updates the
+curproc->fd_table->entries[newFD] and set the fd to newFD.

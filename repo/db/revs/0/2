@@ -1,0 +1,46 @@
+id: 2-1.0-2.r2/0
+type: dir
+pred: 2-1.0.r1/1353310
+count: 1
+text: 1 1352908 389 0 7dd39c50b790ffa1a6cefd266c0dd30b
+cpath: /asst0/ininitial
+copyfrom: 1 /asst0/trunk
+
+PLAIN
+K 9
+ininitial
+V 16
+dir 2-1.0-2.r2/0
+K 5
+trunk
+V 20
+dir 2-1.0.r1/1353310
+END
+ENDREP
+id: 0-1.0.r2/253
+type: dir
+pred: 0-1.0.r1/1353493
+count: 1
+text: 2 164 76 0 58a2c417c5809a868368c9fc2011f581
+cpath: /asst0
+copyroot: 0 /
+
+PLAIN
+K 5
+asst0
+V 16
+dir 0-1.0.r2/253
+END
+ENDREP
+id: 0.0.r2/440
+type: dir
+pred: 0.0.r1/1353669
+count: 2
+text: 2 391 36 0 7af5348f0bcc1f322f6c63e90ab44b21
+cpath: /
+copyroot: 0 /
+
+2-1._0.t1-1 add-dir false false /asst0/ininitial
+1 /asst0/trunk
+
+440 569

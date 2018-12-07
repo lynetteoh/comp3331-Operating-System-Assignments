@@ -1,0 +1,10 @@
+Done part 1, 2 and 3. Done writeup for part 1 and part 2.
+
+--This line, and those below, will be ignored--
+
+M    design.txt
+M    kern/asst1/bar.c
+M    kern/asst1/math.c
+M    kern/asst1/producerconsumer.c
+M    kern/asst1/producerconsumer_driver.c
+M    kern/asst1/twolocks.c
